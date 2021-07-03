@@ -1,45 +1,48 @@
 #!/bin/bash
-# This is the argon1.sh script from argonone.com, with some modifications. 
-# https://download.argon40.com/argon1.sh is the link, in case you'd like to compare.
-
-# Needs sudo to create the missing /boot/cmdline.txt
 if [[ "$EUID" -ne 0 ]]; then
 	echo "Sorry, you need to run this using sudo"
 	exit 2
 fi
 # This only works if you're using the SD Card. I haven't converted mine yet to boot from M.2 so idk.
-cmdline=`blkid --match-tag PARTUUID /dev/mmcblk0p2 | awk '{ print $2 }'`
-echo "console=serial0,115200 console=tty1 root=$cmdline rootfstype=ext4 elevator=deadline fsck.repair=yes rootwait quiet splash plymouth.ignore-serial-consoles" > /boot/cmdline.txt
+if [ -f /boot/cmdline.txt ]; then
+    sudo mv $1 /boot/cmdline.txt.old
+else
+    cmdline=`blkid --match-tag PARTUUID /dev/mmcblk0p2 | awk '{ print $2 }'`
+    echo "console=serial0,115200 console=tty1 root=$cmdline rootfstype=ext4 elevator=deadline fsck.repair=yes rootwait quiet splash plymouth.ignore-serial-consoles" > /boot/cmdline.txt
+fi
+# NOTE(cme): this script is based on the original script
+#            for the argon1 case supposed to run on raspbian
+#            Modifications were made to work on Ubuntu 20.04
+#            This script was tested on a Raspberry Pi 4, with 4Gb RAM
 
 argon_create_file() {
-	if [ -f $1 ]; then
-		sudo rm $1
-	fi
+    if [ -f $1 ]; then
+        sudo rm $1
+    fi
 	sudo touch $1
 	sudo chmod 666 $1
 }
-argon_check_pkg() {
-	RESULT=$(dpkg-query -W -f='${Status}\n' "$1" 2> /dev/null | grep "installed")
 
-	if [ "" == "$RESULT" ]; then
-		echo "NG"
-	else
-		echo "OK"
-	fi
+argon_check_pkg() {
+    RESULT=$(dpkg-query -W -f='${Status}\n' "$1" 2> /dev/null | grep "installed")
+
+    if [ "" == "$RESULT" ]; then
+        echo "NG"
+    else
+        echo "OK"
+    fi
 }
 
-CHECKPLATFORM="Others"
-# Check if Raspbian, otherwise Ubuntu
-grep -q -F 'Raspbian' /etc/os-release &> /dev/null
-if [ $? -eq 0 ]
-then
-	CHECKPLATFORM="Raspbian"
-	pkglist=(raspi-gpio python3-rpi.gpio python3-smbus i2c-tools)	
-else
-	# Ubuntu has serial and i2c enabled - added libraspberrypi-bin and raspi-config
-	pkglist=(python3-rpi.gpio python3-smbus i2c-tools libraspberrypi-bin raspi-config)
-fi
+# NOTE(cme): original raspbian packages
+# pkglist=(raspi-gpio python-rpi.gpio python3-rpi.gpio python-smbus python3-smbus i2c-tools)
 
+# NOTE(cme): ubuntu packages; since python2 is not supported - not well anyway,
+#            we'll modify everything to work with python3)
+pkglist=(python3-rpi.gpio python3-smbus)
+
+echo "*****************************************************"
+echo "Step 1 - installing necessary dependencies           " 
+echo "*****************************************************"
 for curpkg in ${pkglist[@]}; do
 	sudo apt-get install -y $curpkg
 	RESULT=$(argon_check_pkg "$curpkg")
@@ -52,13 +55,8 @@ for curpkg in ${pkglist[@]}; do
 	fi
 done
 
-# Ubuntu Mate for RPi has raspi-config too
-command -v raspi-config &> /dev/null
-if [ $? -eq 0 ]
-then
-	sudo raspi-config nonint do_i2c 0
-	sudo raspi-config nonint do_serial 0
-fi
+# NOTE(cme): don't assume /home/pi
+desktop="/home/$(whoami)/Desktop"
 
 daemonname="argononed"
 powerbuttonscript=/usr/bin/$daemonname.py
@@ -66,9 +64,22 @@ shutdownscript="/lib/systemd/system-shutdown/"$daemonname"-poweroff.py"
 daemonconfigfile=/etc/$daemonname.conf
 configscript=/usr/bin/argonone-config
 removescript=/usr/bin/argonone-uninstall
+tempmonscript=/usr/bin/argonone-tempmon
 
 daemonfanservice=/lib/systemd/system/$daemonname.service
+
+# NOTE(cme): this is apparently used to enable i2c and serial.
+#            not sure if this is already done on Ubuntu...
+# sudo raspi-config nonint do_i2c 0
+# sudo raspi-config nonint do_serial 0	
 	
+
+echo "*****************************************************"
+echo "Step 2 - generating $daemonconfigfile" 
+echo "*****************************************************"
+	
+# NOTE(cme): this generates a config file where one can setup the fan curve
+#            should work as is on Ubuntu.	
 if [ ! -f $daemonconfigfile ]; then
 	# Generate config file for fan speed
 	sudo touch $daemonconfigfile
@@ -98,51 +109,77 @@ if [ ! -f $daemonconfigfile ]; then
 	echo '65=100' >> $daemonconfigfile
 fi
 
-# Generate script that runs every shutdown event
+
+echo "*****************************************************"
+echo "Step 3 - generating $shutdownscript           " 
+echo "*****************************************************"
+
+
+# NOTE(cme): this generates a shutdown script originally using python2;
+#            here adapted to work with python3
+
 argon_create_file $shutdownscript
 
 echo "#!/usr/bin/python3" >> $shutdownscript
+echo >> $shutdownscript
+
 echo 'import sys' >> $shutdownscript
 echo 'import smbus' >> $shutdownscript
 echo 'import RPi.GPIO as GPIO' >> $shutdownscript
+echo >> $shutdownscript
+
 echo 'rev = GPIO.RPI_REVISION' >> $shutdownscript
 echo 'if rev == 2 or rev == 3:' >> $shutdownscript
 echo '	bus = smbus.SMBus(1)' >> $shutdownscript
 echo 'else:' >> $shutdownscript
 echo '	bus = smbus.SMBus(0)' >> $shutdownscript
+echo >> $shutdownscript
 
 echo 'if len(sys.argv)>1:' >> $shutdownscript
 echo "	bus.write_byte(0x1a,0)"  >> $shutdownscript
-
-# powercut signal
 echo '	if sys.argv[1] == "poweroff" or sys.argv[1] == "halt":'  >> $shutdownscript
 echo "		try:"  >> $shutdownscript
 echo "			bus.write_byte(0x1a,0xFF)"  >> $shutdownscript
 echo "		except:"  >> $shutdownscript
 echo "			rev=0"  >> $shutdownscript
+echo >> $shutdownscript
 
 sudo chmod 755 $shutdownscript
+
+
+echo "*****************************************************"
+echo "Step 4 - generating $powerbuttonscript" 
+echo "*****************************************************"
+
+# NOTE(cme): this generates the script to monitor if someone 
+#            presses the power button; migrated to python 3
 
 # Generate script to monitor shutdown button
 
 argon_create_file $powerbuttonscript
 
 echo "#!/usr/bin/python3" >> $powerbuttonscript
+echo >> $powerbuttonscript
+
 echo 'import smbus' >> $powerbuttonscript
 echo 'import RPi.GPIO as GPIO' >> $powerbuttonscript
 echo 'import os' >> $powerbuttonscript
 echo 'import time' >> $powerbuttonscript
+echo >> $powerbuttonscript
+
 echo 'from threading import Thread' >> $powerbuttonscript
 echo 'rev = GPIO.RPI_REVISION' >> $powerbuttonscript
 echo 'if rev == 2 or rev == 3:' >> $powerbuttonscript
 echo '	bus = smbus.SMBus(1)' >> $powerbuttonscript
 echo 'else:' >> $powerbuttonscript
 echo '	bus = smbus.SMBus(0)' >> $powerbuttonscript
+echo >> $powerbuttonscript
 
 echo 'GPIO.setwarnings(False)' >> $powerbuttonscript
 echo 'GPIO.setmode(GPIO.BCM)' >> $powerbuttonscript
 echo 'shutdown_pin=4' >> $powerbuttonscript
 echo 'GPIO.setup(shutdown_pin, GPIO.IN,  pull_up_down=GPIO.PUD_DOWN)' >> $powerbuttonscript
+echo >> $powerbuttonscript
 
 echo 'def shutdown_check():' >> $powerbuttonscript
 echo '	while True:' >> $powerbuttonscript
@@ -153,9 +190,13 @@ echo '		while GPIO.input(shutdown_pin) == GPIO.HIGH:' >> $powerbuttonscript
 echo '			time.sleep(0.01)' >> $powerbuttonscript
 echo '			pulsetime += 1' >> $powerbuttonscript
 echo '		if pulsetime >=2 and pulsetime <=3:' >> $powerbuttonscript
+echo '			print("Rebooting...")' >> $powerbuttonscript
 echo '			os.system("reboot")' >> $powerbuttonscript
 echo '		elif pulsetime >=4 and pulsetime <=5:' >> $powerbuttonscript
+echo '			print("Shuting down...")' >> $powerbuttonscript
 echo '			os.system("shutdown now -h")' >> $powerbuttonscript
+echo >> $powerbuttonscript
+
 
 echo 'def get_fanspeed(tempval, configlist):' >> $powerbuttonscript
 echo '	for curconfig in configlist:' >> $powerbuttonscript
@@ -165,6 +206,8 @@ echo '		fancfg = int(float(curpair[1]))' >> $powerbuttonscript
 echo '		if tempval >= tempcfg:' >> $powerbuttonscript
 echo '			return fancfg' >> $powerbuttonscript
 echo '	return 0' >> $powerbuttonscript
+echo >> $powerbuttonscript
+
 
 echo 'def load_config(fname):' >> $powerbuttonscript
 echo '	newconfig = []' >> $powerbuttonscript
@@ -201,6 +244,7 @@ echo '			newconfig.sort(reverse=True)' >> $powerbuttonscript
 echo '	except:' >> $powerbuttonscript
 echo '		return []' >> $powerbuttonscript
 echo '	return newconfig' >> $powerbuttonscript
+echo >> $powerbuttonscript
 
 echo 'def temp_check():' >> $powerbuttonscript
 echo '	fanconfig = ["65=100", "60=55", "55=10"]' >> $powerbuttonscript
@@ -211,13 +255,16 @@ echo '	address=0x1a' >> $powerbuttonscript
 echo '	prevblock=0' >> $powerbuttonscript
 echo '	while True:' >> $powerbuttonscript
 
-echo '		try:' >> $powerbuttonscript
-echo '			tempfp = open("/sys/class/thermal/thermal_zone0/temp", "r")' >> $powerbuttonscript
-echo '			temp = tempfp.readline()' >> $powerbuttonscript
-echo '			tempfp.close()' >> $powerbuttonscript
-echo '			val = float(int(temp)/1000)' >> $powerbuttonscript
-echo '		except IOError:' >> $powerbuttonscript
-echo '			val = 0' >> $powerbuttonscript
+
+# NOTE(cme): AFAIK vcgencmd is not available on ubuntu, so use sysfs instead
+#echo '		temp = os.popen("vcgencmd measure_temp").readline()' >> $powerbuttonscript
+#echo '		temp = temp.replace("temp=","")' >> $powerbuttonscript
+#echo '		val = float(temp.replace("'"'"'C",""))' >> $powerbuttonscript
+
+echo '		with open("/sys/class/thermal/thermal_zone0/temp", "r") as fp:' >> $powerbuttonscript
+echo '			temp = fp.readline()' >> $powerbuttonscript
+echo '		val = float(int(temp)/1000)' >> $powerbuttonscript
+
 
 echo '		block = get_fanspeed(val, fanconfig)' >> $powerbuttonscript
 echo '		if block < prevblock:' >> $powerbuttonscript
@@ -228,6 +275,7 @@ echo '			bus.write_byte(address,block)' >> $powerbuttonscript
 echo '		except IOError:' >> $powerbuttonscript
 echo '			temp=""' >> $powerbuttonscript
 echo '		time.sleep(30)' >> $powerbuttonscript
+echo >> $powerbuttonscript
 
 echo 'try:' >> $powerbuttonscript
 echo '	t1 = Thread(target = shutdown_check)' >> $powerbuttonscript
@@ -238,8 +286,13 @@ echo 'except:' >> $powerbuttonscript
 echo '	t1.stop()' >> $powerbuttonscript
 echo '	t2.stop()' >> $powerbuttonscript
 echo '	GPIO.cleanup()' >> $powerbuttonscript
+echo >> $powerbuttonscript
 
 sudo chmod 755 $powerbuttonscript
+
+echo "*****************************************************"
+echo "Step 5 - generating $daemonfanservice" 
+echo "*****************************************************"
 
 argon_create_file $daemonfanservice
 
@@ -256,6 +309,10 @@ echo '[Install]' >> $daemonfanservice
 echo "WantedBy=multi-user.target" >> $daemonfanservice
 
 sudo chmod 644 $daemonfanservice
+
+echo "*****************************************************"
+echo "Step 6 - generating $removescript" 
+echo "*****************************************************"
 
 argon_create_file $removescript
 
@@ -277,9 +334,16 @@ echo 'then' >> $removescript
 echo '	echo "Cancelled"' >> $removescript
 echo '	exit' >> $removescript
 echo 'fi' >> $removescript
-echo 'if [ -d "/home/pi/Desktop" ]; then' >> $removescript
-echo '	sudo rm "/home/pi/Desktop/argonone-config.desktop"' >> $removescript
-echo '	sudo rm "/home/pi/Desktop/argonone-uninstall.desktop"' >> $removescript
+
+# NOTE(cme): don't assume /home/pi
+# echo 'if [ -d "/home/pi/Desktop" ]; then' >> $removescript
+# echo '	sudo rm "/home/pi/Desktop/argonone-config.desktop"' >> $removescript
+# echo '	sudo rm "/home/pi/Desktop/argonone-uninstall.desktop"' >> $removescript
+
+echo "if [ -d "$desktop" ]; then" >> $removescript
+echo "	sudo rm \"$desktop/argonone-config.desktop\"" >> $removescript
+echo "	sudo rm \"$desktop/argonone-uninstall.desktop\"" >> $removescript
+
 echo 'fi' >> $removescript
 echo 'if [ -f '$powerbuttonscript' ]; then' >> $removescript
 echo '	sudo systemctl stop '$daemonname'.service' >> $removescript
@@ -294,11 +358,16 @@ echo 'fi' >> $removescript
 
 sudo chmod 755 $removescript
 
+
+echo "*****************************************************"
+echo "Step 7 - generating $configscript" 
+echo "*****************************************************"
+
 argon_create_file $configscript
 
 # Config Script
 echo '#!/bin/bash' >> $configscript
-echo 'daemonconfigfile='$daemonconfigfile >> $configscript
+echo 'daemonconfigfile=/etc/'$daemonname'.conf' >> $configscript
 echo 'echo "--------------------------------------"' >> $configscript
 echo 'echo "Argon One Fan Speed Configuration Tool"' >> $configscript
 echo 'echo "--------------------------------------"' >> $configscript
@@ -473,60 +542,78 @@ echo 'fi' >> $configscript
 
 sudo chmod 755 $configscript
 
-
 sudo systemctl daemon-reload
 sudo systemctl enable $daemonname.service
 
 sudo systemctl start $daemonname.service
 
-
-shortcutfile="/home/pi/Desktop/argonone-config.desktop"
-if [ "$CHECKPLATFORM" = "Raspbian" ] && [ -d "/home/pi/Desktop" ]
-then
-	sudo wget http://download.argon40.com/ar1config.png -O /usr/share/pixmaps/ar1config.png --quiet
-	sudo wget http://download.argon40.com/ar1uninstall.png -O /usr/share/pixmaps/ar1uninstall.png --quiet
+if [ -d "$desktop" ]; then
+	sudo wget http://download.argon40.com/ar1config.png -O /usr/share/pixmaps/ar1config.png
+	sudo wget http://download.argon40.com/ar1uninstall.png -O /usr/share/pixmaps/ar1uninstall.png
 	# Create Shortcuts
-	echo "[Desktop Entry]" > $shortcutfile
+	# NOTE(cme): don't assume /home/pi/
+	# shortcutfile="/home/pi/Desktop/argonone-config.desktop"
+	shortcutfile="$desktop/argonone-config.desktop"
+    echo "[Desktop Entry]" > $shortcutfile
 	echo "Name=Argon One Configuration" >> $shortcutfile
 	echo "Comment=Argon One Configuration" >> $shortcutfile
 	echo "Icon=/usr/share/pixmaps/ar1config.png" >> $shortcutfile
-	echo 'Exec=lxterminal -t "Argon One Configuration" --working-directory=/home/pi/ -e '$configscript >> $shortcutfile
+	# NOTE(cme): don't assume lxterminal is installed
+	# echo 'Exec=lxterminal -t "Argon One Configuration" --working-directory=/home/pi/ -e '$configscript >> $shortcutfile
+	echo "Exec=$configscript" >> $shortcutfile
+
 	echo "Type=Application" >> $shortcutfile
 	echo "Encoding=UTF-8" >> $shortcutfile
-	echo "Terminal=false" >> $shortcutfile
+	# NOTE(cme): use builtin terminal instead
+	# echo "Terminal=false" >> $shortcutfile
+	echo "Terminal=true" >> $shortcutfile
 	echo "Categories=None;" >> $shortcutfile
 	chmod 755 $shortcutfile
 	
-	shortcutfile="/home/pi/Desktop/argonone-uninstall.desktop"
+	# NOTE(cme): don't assume /home/pi/
+	shortcutfile="$desktop/argonone-uninstall.desktop"
 	echo "[Desktop Entry]" > $shortcutfile
 	echo "Name=Argon One Uninstall" >> $shortcutfile
 	echo "Comment=Argon One Uninstall" >> $shortcutfile
 	echo "Icon=/usr/share/pixmaps/ar1uninstall.png" >> $shortcutfile
-	echo 'Exec=lxterminal -t "Argon One Uninstall" --working-directory=/home/pi/ -e '$removescript >> $shortcutfile
+	# NOTE(cme): don't assume lxterminal is installed
+	# echo 'Exec=lxterminal -t "Argon One Uninstall" --working-directory=/home/pi/ -e '$removescript >> $shortcutfile
+	echo "Exec=$removescript" >> $shortcutfile
 	echo "Type=Application" >> $shortcutfile
 	echo "Encoding=UTF-8" >> $shortcutfile
-	echo "Terminal=false" >> $shortcutfile
+	# NOTE(cme): use builtin terminal instead
+	# echo "Terminal=false" >> $shortcutfile
+	echo "Terminal=true" >> $shortcutfile
 	echo "Categories=None;" >> $shortcutfile
 	chmod 755 $shortcutfile
 fi
 
-# IR config script
-sudo wget https://download.argon40.com/argonone-irconfig.sh -O /usr/bin/argonone-ir --quiet
-sudo chmod 755 /usr/bin/argonone-ir
+
+echo "*****************************************************"
+echo "Step 8 (extra) - generating $tempmonscript" 
+echo "*****************************************************"
+
+#NOTE(cme): extra utility script to monitor the temperature of the CPU using sysfs
+
+argon_create_file $tempmonscript
+
+echo 'while true; do clear; date; echo "$(( $(cat /sys/class/thermal/thermal_zone0/temp) / 1000 ))°C"; sleep 1 ; done' >> $tempmonscript
+
+sudo chmod 755 $tempmonscript
+
+
+
+
+
 
 echo "***************************"
 echo "Argon One Setup Completed."
 echo "***************************"
-echo
-if [ ! "$CHECKPLATFORM" = "Raspbian" ]
-then
-		echo "You may need to reboot for changes to take effect"
-		echo
-fi 
-if [ -f $shortcutfile ]; then
+echo 
+if [ -d "/home/pi/Desktop" ]; then
 	echo Shortcuts created in your desktop.
 else
 	echo Use 'argonone-config' to configure fan
 	echo Use 'argonone-uninstall' to uninstall
+	echo Use 'argonone-tempmon' to monitor the temperature
 fi
-echo
