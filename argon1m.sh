@@ -1,6 +1,8 @@
 #!/bin/bash
-# https://github.com/meuter/argon-one-case-ubuntu-20.04/ - with some modifications.
+# This is the argon1.sh script from argonone.com, with some modifications. 
+# https://download.argon40.com/argon1.sh is the link, in case you'd like to compare.
 
+# Needs sudo to create the missing /boot/cmdline.txt
 if [[ "$EUID" -ne 0 ]]; then
 	echo "Sorry, you need to run this using sudo"
 	exit 2
@@ -34,7 +36,7 @@ then
 	CHECKPLATFORM="Raspbian"
 	pkglist=(raspi-gpio python3-rpi.gpio python3-smbus i2c-tools)	
 else
-	# Ubuntu has serial and i2c enabled
+	# Ubuntu has serial and i2c enabled - added libraspberrypi-bin and raspi-config
 	pkglist=(python3-rpi.gpio python3-smbus i2c-tools libraspberrypi-bin raspi-config)
 fi
 
