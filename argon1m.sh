@@ -5,7 +5,7 @@ if [[ "$EUID" -ne 0 ]]; then
 fi
 # This only works if you're using the SD Card. I haven't converted mine yet to boot from M.2 so idk.
 if [ -f /boot/cmdline.txt ]; then
-    sudo mv $1 /boot/cmdline.txt.old
+    sudo mv /boot/cmdline.txt /boot/cmdline.txt.old
 else
     cmdline=`blkid --match-tag PARTUUID /dev/mmcblk0p2 | awk '{ print $2 }'`
     echo "console=serial0,115200 console=tty1 root=$cmdline rootfstype=ext4 elevator=deadline fsck.repair=yes rootwait quiet splash plymouth.ignore-serial-consoles" > /boot/cmdline.txt
